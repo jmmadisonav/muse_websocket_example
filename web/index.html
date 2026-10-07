@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSE WebSocket Demo</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1d2330; --muted: #667085;
+    --border: #e1e4ea; --accent: #0b6bcb; --ok: #1a7f37; --bad: #c4311d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e6e9ef; --muted: #98a2b3;
+      --border: #2b323e; --accent: #4ea1ff; --ok: #3fb950; --bad: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; display: grid; gap: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 13px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  .connected .dot { background: var(--ok); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat .value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .label { color: var(--muted); font-size: 13px; }
+  .switch-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  button {
+    font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .lamp {
+    width: 64px; height: 34px; border-radius: 17px; background: var(--border);
+    position: relative; transition: background .2s;
+  }
+  .lamp::after {
+    content: ""; position: absolute; top: 4px; left: 4px; width: 26px; height: 26px;
+    border-radius: 50%; background: #fff; transition: left .2s;
+  }
+  .lamp.on { background: var(--ok); }
+  .lamp.on::after { left: 34px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input {
+    flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  #log {
+    height: 220px; overflow-y: auto; margin: 0; padding: 8px; border-radius: 8px;
+    background: var(--bg); font: 13px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+  }
+  .in { color: var(--accent); }
+  .out { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>MUSE WebSocket Demo</h1>
+    <span id="status" class="status"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+  </header>
+
+  <section class="card">
+    <h2>Server push (MUSE timeline)</h2>
+    <div class="stats">
+      <div class="stat"><div class="value" id="ticks">–</div><div class="label">Timeline ticks</div></div>
+      <div class="stat"><div class="value" id="clock">–</div><div class="label">Controller time</div></div>
+      <div class="stat"><div class="value" id="clients">–</div><div class="label">Connected browsers</div></div>
+      <div class="stat"><div class="value" id="rtt">–</div><div class="label">Round trip (ms)</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Shared state</h2>
+    <div class="switch-row">
+      <div id="lamp" class="lamp" aria-label="Switch state"></div>
+      <button id="toggle" class="primary" disabled>Toggle switch</button>
+      <span id="switch-by" class="muted">Open this page in a second tab, then toggle.</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Messages</h2>
+    <pre id="log"></pre>
+    <form id="chat">
+      <input id="text" placeholder="Type a message to broadcast to every browser" autocomplete="off">
+      <button type="submit" disabled>Send</button>
+    </form>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let ws;
+  let retryMs = 1000;
+
+  function log(text, cls) {
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = text;
+    $("log").appendChild(line);
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+
+  function setConnected(connected) {
+    $("status").classList.toggle("connected", connected);
+    $("status-text").textContent = connected ? "Connected" : "Disconnected – retrying…";
+    document.querySelectorAll("button").forEach((b) => (b.disabled = !connected));
+  }
+
+  function send(message) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+  }
+
+  function setSwitch(on) {
+    $("lamp").classList.toggle("on", on);
+  }
+
+  function connect() {
+    // The WebSocket shares the page's host and port.
+    const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+    ws = new WebSocket(scheme + location.host + "/ws");
+
+    ws.onopen = () => {
+      retryMs = 1000;
+      setConnected(true);
+      log("* Connected to " + location.host, "out");
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      log("* Connection closed; retrying in " + retryMs / 1000 + " s", "out");
+      setTimeout(connect, retryMs);
+      retryMs = Math.min(retryMs * 2, 10000);
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      switch (msg.type) {
+        case "welcome":
+          setSwitch(msg.switch);
+          $("ticks").textContent = msg.ticks;
+          log("* Server knows you as " + msg.you, "out");
+          break;
+        case "tick":
+          $("ticks").textContent = msg.count;
+          $("clock").textContent = msg.time;
+          break;
+        case "clients":
+          $("clients").textContent = msg.count;
+          break;
+        case "switch":
+          setSwitch(msg.value);
+          $("switch-by").textContent = "Set " + (msg.value ? "ON" : "OFF") + " by " + msg.by;
+          break;
+        case "chat":
+          log("[" + msg.time + "] " + msg.from + ": " + msg.text, "in");
+          break;
+        case "pong":
+          $("rtt").textContent = Math.round(performance.now() - msg.sent);
+          break;
+      }
+    };
+  }
+
+  $("toggle").addEventListener("click", () => send({ type: "toggle" }));
+
+  $("chat").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = $("text").value.trim();
+    if (!text) return;
+    send({ type: "chat", text });
+    $("text").value = "";
+  });
+
+  // Measures round-trip time every 2 seconds.
+  setInterval(() => send({ type: "ping", sent: performance.now() }), 2000);
+
+  connect();
+</script>
+</body>
+</html>

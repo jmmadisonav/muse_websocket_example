@@ -1,0 +1,10 @@
+{
+  "id": "websocket_example",
+  "name": "websocket_example",
+  "description": "Hosts a web page that uses WebSockets to show live MUSE data",
+  "disabled": false,
+  "provider": "python",
+  "scope": "",
+  "script": "main.py",
+  "envvars": {}
+}
